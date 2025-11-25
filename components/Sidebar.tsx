@@ -1,13 +1,14 @@
 
 import React from 'react';
-import { Book, PlusCircle, FileText } from 'lucide-react';
+import { Book, PlusCircle, FileText, Clock } from 'lucide-react';
 
 interface SidebarProps {
   activeView: 'tree' | 'add' | 'specs';
   setActiveView: (view: 'tree' | 'add' | 'specs') => void;
+  lastSaved?: Date | null;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeView, setActiveView }) => {
+const Sidebar: React.FC<SidebarProps> = ({ activeView, setActiveView, lastSaved }) => {
   return (
     <div className="w-64 bg-slate-700 text-white flex flex-col h-full shadow-xl z-10">
       <div className="p-4 border-b border-slate-600 bg-slate-800">
@@ -57,8 +58,16 @@ const Sidebar: React.FC<SidebarProps> = ({ activeView, setActiveView }) => {
         </button>
       </nav>
       
-      <div className="p-4 text-xs text-slate-400 text-center border-t border-slate-600 bg-slate-800">
-        Enterprise Edition v2.0
+      <div className="p-4 border-t border-slate-600 bg-slate-800 flex flex-col gap-1">
+        <div className="text-xs text-slate-400 text-center">
+          Enterprise Edition v2.0
+        </div>
+        {lastSaved && (
+          <div className="text-[10px] text-emerald-400 flex items-center justify-center mt-1 animate-pulse-once">
+            <Clock className="w-3 h-3 ml-1" />
+            تم الحفظ: {lastSaved.toLocaleTimeString('ar-EG')}
+          </div>
+        )}
       </div>
     </div>
   );

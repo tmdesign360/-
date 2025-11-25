@@ -1,3 +1,4 @@
+
 import { Account, TreeNode } from './types';
 import { RAW_DATA } from './constants';
 
@@ -11,22 +12,19 @@ export const parseAccounts = (): Account[] => {
     // Split by tab or multiple spaces if tab is missing (fallback)
     const cols = line.split(/\t+/);
     
-    // Mapping based on: التسلسل, النوع, رقم الحساب, اسم الحساب, نوع القائمة, المستوى, الحساب_الرئيسي...
-    // Clean up possible "--" or empty strings for parent
+    // Mapping: 
+    // 0: Serial
+    // 1: Type
+    // 2: Code
+    // 3: Name
+    // 4: ReportType
+    // 5: Level
+    // 6: ParentCode
+    // 7: Details (Optional)
+
     let parentCode = cols[6]?.trim();
     if (!parentCode || parentCode === '--' || parentCode === '') {
-        // For the provided dataset, sometimes parent is in col 6, but sometimes empty.
-        // Top level nodes (Level 1) have no parent.
-        // Sub nodes usually have parent. 
-        // Special handling: Analytical accounts (column 8 is 'حساب_فرعي_أب' sometimes?)
-        
-        const analyticalParent = cols[8]?.trim();
-        if(analyticalParent && analyticalParent !== '--') {
-             parentCode = analyticalParent;
-        } else {
-             // Ensure it is an empty string, not null, to match interface
-             parentCode = ''; 
-        }
+        parentCode = '';
     }
 
     return {
@@ -35,10 +33,10 @@ export const parseAccounts = (): Account[] => {
       type: cols[1]?.trim(),
       code: cols[2]?.trim(),
       name: cols[3]?.trim(),
-      details: '',
       reportType: cols[4]?.trim(),
       level: parseInt(cols[5]?.trim() || '0', 10),
       parentCode: parentCode,
+      details: cols[7]?.trim() || '', // Parse Details
       createdAt: now,
       updatedAt: now
     };
@@ -47,7 +45,7 @@ export const parseAccounts = (): Account[] => {
   return accounts.filter(a => a.code); // Remove empty lines
 };
 
-// Converts flat list to Tree structure with cycle protection
+// Converts flat list to Tree structure with robust cycle protection
 export const buildTree = (accounts: Account[]): TreeNode[] => {
   const accountMap = new Map<string, TreeNode>();
   const roots: TreeNode[] = [];
@@ -58,57 +56,61 @@ export const buildTree = (accounts: Account[]): TreeNode[] => {
     accountMap.set(account.code, { ...account, children: [], isExpanded: false });
   });
 
-  // 2. Build hierarchy
+  // 2. Build hierarchy with Cycle Protection
   accounts.forEach((account) => {
     const node = accountMap.get(account.code);
     if (!node) return;
 
-    // CRITICAL FIX: Prevent self-referencing which causes infinite loops/crashes
-    if (account.parentCode === account.code) {
-        console.warn(`Circular reference detected: Account ${account.code} points to itself as parent. Treating as root.`);
+    const parentCode = account.parentCode;
+
+    // Case 0: Root Node (No parent)
+    if (!parentCode || parentCode === '--' || parentCode === '') {
         roots.push(node);
         return;
     }
 
-    // DEEP CYCLE CHECK: Prevent loops like A->B->A or A->B->C->A
-    let isCycle = false;
-    if (account.parentCode) {
-        let ancestorCode = account.parentCode;
+    // Case 1: Self-reference (Immediate cycle)
+    if (parentCode === account.code) {
+        console.warn(`Self-reference detected for account ${account.code}. Detaching.`);
+        roots.push(node);
+        return;
+    }
+
+    const parent = accountMap.get(parentCode);
+
+    if (parent) {
+        // Case 2: Deep Cycle Check (Ancestor traversal)
+        let isCycle = false;
+        let ancestor = parent;
+        const visited = new Set<string>();
+        visited.add(account.code);
+
         let depth = 0;
-        // Traverse up the potential tree structure using parentCode pointers
-        // to see if we ever hit the current node's code.
-        while(ancestorCode && depth < 50) {
-            if (ancestorCode === account.code) {
+        while(ancestor && depth < 100) {
+            if (visited.has(ancestor.code)) {
                 isCycle = true;
                 break;
             }
-            const ancestor = accountMap.get(ancestorCode);
-            ancestorCode = ancestor ? ancestor.parentCode : '';
+            visited.add(ancestor.code);
+            
+            // Move up
+            if (ancestor.parentCode && accountMap.has(ancestor.parentCode)) {
+                ancestor = accountMap.get(ancestor.parentCode)!;
+            } else {
+                break; // Reached top
+            }
             depth++;
         }
-    }
 
-    if (isCycle) {
-        console.warn(`Deep cycle detected for account ${account.code}. Detaching from parent to prevent crash.`);
-        roots.push(node);
-        return;
-    }
-
-    if (account.level === 1) {
-      roots.push(node);
-    } else {
-      if (account.parentCode && accountMap.has(account.parentCode)) {
-        const parent = accountMap.get(account.parentCode);
-        // Double check strict parenting to avoid orphans
-        if (parent) {
-            parent.children.push(node);
-        } else {
+        if (isCycle) {
+            console.error(`Cycle detected: Account ${account.code} creates a loop. Treating as root.`);
             roots.push(node);
+        } else {
+            parent.children.push(node);
         }
-      } else {
-        // Fallback: if parent not found but level > 1, treat as root
-        roots.push(node); 
-      }
+    } else {
+        // Orphan node (parent code exists but parent node not found)
+        roots.push(node);
     }
   });
 

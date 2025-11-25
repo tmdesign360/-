@@ -5,6 +5,8 @@ import AccountTree from './components/AccountTree';
 import AccountDetails from './components/AccountDetails';
 import SystemSpecs from './components/SystemSpecs';
 import ExcelPreviewModal from './components/ExcelPreviewModal';
+import ConfirmationModal from './components/ConfirmationModal';
+import SmartAssistant from './components/SmartAssistant';
 import { parseAccounts, buildTree } from './utils';
 import { Account, TreeNode } from './types';
 import * as XLSX from 'xlsx';
@@ -27,6 +29,7 @@ const App: React.FC = () => {
     return parseAccounts();
   });
 
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<TreeNode | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   
@@ -34,9 +37,18 @@ const App: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportPreviewData, setExportPreviewData] = useState<any[]>([]);
 
+  // Delete Confirmation State
+  const [deleteModal, setDeleteModal] = useState({
+    isOpen: false,
+    accountId: null as string | null,
+    accountName: '',
+    descendantCount: 0
+  });
+
   // Persist changes to LocalStorage whenever accounts change
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(accounts));
+    setLastSaved(new Date());
   }, [accounts]);
 
   const refreshData = () => {
@@ -93,13 +105,124 @@ const App: React.FC = () => {
     setIsEditing(false);
   };
 
-  const handleDelete = (id: string) => {
-     if(window.confirm('هل أنت متأكد من حذف هذا الحساب؟')) {
-         const updatedAccounts = accounts.filter(a => a.id !== id);
-         setAccounts(updatedAccounts);
-         setSelectedAccount(null);
-     }
-  }
+  const initiateDelete = (id: string) => {
+    const accountToDelete = accounts.find(a => a.id === id);
+    if (!accountToDelete) return;
+
+    // Recursive function to find all descendants codes
+    const getDescendants = (parentCode: string): string[] => {
+        const children = accounts.filter(a => a.parentCode === parentCode);
+        let descendantIds = children.map(c => c.id);
+        children.forEach(c => {
+            descendantIds = [...descendantIds, ...getDescendants(c.code)];
+        });
+        return descendantIds;
+    };
+
+    const descendantsIds = getDescendants(accountToDelete.code);
+    
+    setDeleteModal({
+      isOpen: true,
+      accountId: id,
+      accountName: accountToDelete.name,
+      descendantCount: descendantsIds.length
+    });
+  };
+
+  const confirmDelete = () => {
+    const { accountId } = deleteModal;
+    if (!accountId) return;
+
+    const accountToDelete = accounts.find(a => a.id === accountId);
+    if (!accountToDelete) {
+        setDeleteModal(prev => ({ ...prev, isOpen: false }));
+        return;
+    }
+
+    // Re-calculate descendants to be safe
+    const getDescendants = (parentCode: string): string[] => {
+        const children = accounts.filter(a => a.parentCode === parentCode);
+        let descendantIds = children.map(c => c.id);
+        children.forEach(c => {
+            descendantIds = [...descendantIds, ...getDescendants(c.code)];
+        });
+        return descendantIds;
+    };
+
+    const descendantsIds = getDescendants(accountToDelete.code);
+    const idsToRemove = new Set([accountId, ...descendantsIds]);
+    
+    const updatedAccounts = accounts.filter(a => !idsToRemove.has(a.id));
+    setAccounts(updatedAccounts);
+    
+    if (selectedAccount && idsToRemove.has(selectedAccount.id)) {
+        setSelectedAccount(null);
+    }
+
+    setDeleteModal(prev => ({ ...prev, isOpen: false }));
+  };
+
+  // AI Handler: Add Account Programmatically
+  const handleAIAddAccount = (data: { name: string; parentCode: string; type: string; details?: string }): string | null => {
+    const parentCode = data.parentCode;
+    
+    // Validate Parent (Optional: if parentCode is empty, assume root?)
+    // Note: If parentCode is provided but not found, we might fail or try best effort.
+    const parentAccount = accounts.find(a => a.code === parentCode);
+    
+    if (parentCode && !parentAccount) {
+        // Parent Code provided but not found in DB
+        return null;
+    }
+
+    // Calculate next code (Reuse logic)
+    const siblings = accounts.filter(a => a.parentCode === parentCode);
+    let nextSuffixVal = 1;
+    let padLength = 2;
+
+    if (siblings.length > 0) {
+       let maxVal = 0;
+       let maxSuffixStr = '';
+       siblings.forEach(c => {
+           if(c.code.startsWith(parentCode)) {
+               const suffix = c.code.slice(parentCode.length);
+               const val = parseInt(suffix, 10);
+               if (!isNaN(val) && val > maxVal) {
+                   maxVal = val;
+                   maxSuffixStr = suffix;
+               }
+           }
+       });
+       nextSuffixVal = maxVal + 1;
+       padLength = maxSuffixStr.length || 2;
+    } else {
+        // Heuristics for empty or new parent
+        if (parentCode.length === 1) padLength = 1;
+        else padLength = 2;
+        if (parentCode === '') padLength = 1; // Root
+    }
+
+    const suffixStr = nextSuffixVal.toString().padStart(padLength, '0');
+    const newCode = `${parentCode}${suffixStr}`;
+    const now = new Date().toISOString();
+
+    const newAccount: Account = {
+        id: newCode,
+        code: newCode,
+        name: data.name,
+        details: data.details || '',
+        type: data.type || 'فرعي',
+        reportType: parentAccount?.reportType || 'الميزانية',
+        level: (parentAccount?.level || 0) + 1,
+        parentCode: parentCode,
+        serial: (accounts.length + 1).toString(),
+        createdAt: now,
+        updatedAt: now
+    };
+
+    setAccounts(prev => [...prev, newAccount]);
+    return newCode;
+  };
 
   // 1. Prepare Data and Open Modal
   const handleExportClick = () => {
@@ -139,7 +262,8 @@ const App: React.FC = () => {
     const now = new Date().toISOString();
     
     // Create map for preserving existing accounts metadata
-    const existingMap = new Map(accounts.map(a => [a.code, a]));
+    const existingMap = new Map<string, Account>();
+    accounts.forEach(a => existingMap.set(a.code, a));
 
     const mappedAccounts: Account[] = flatData.map((row) => {
         const code = row['رقم الحساب'];
@@ -223,7 +347,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden font-sans bg-gray-100">
-      <Sidebar activeView={activeView} setActiveView={setActiveView} />
+      <Sidebar activeView={activeView} setActiveView={setActiveView} lastSaved={lastSaved} />
       
       <main className="flex-1 flex flex-col min-w-0">
         
@@ -236,7 +360,7 @@ const App: React.FC = () => {
                 existingAccounts={accounts}
                 selectedAccount={selectedAccount} 
                 onSave={handleSave}
-                onDelete={handleDelete}
+                onDelete={initiateDelete}
                 isEditing={isEditing}
                 setIsEditing={setIsEditing}
                 onRefresh={refreshData}
@@ -251,6 +375,7 @@ const App: React.FC = () => {
                         data={treeData} 
                         onSelect={handleSelectAccount} 
                         selectedId={selectedAccount?.id || null}
+                        onDelete={initiateDelete}
                     />
                 </div>
 
@@ -263,6 +388,9 @@ const App: React.FC = () => {
         )}
       </main>
 
+      {/* Smart Assistant (AI) */}
+      <SmartAssistant accounts={accounts} onAddAccount={handleAIAddAccount} />
+
       {/* Export Modal */}
       <ExcelPreviewModal 
         isOpen={isExportModalOpen}
@@ -270,6 +398,16 @@ const App: React.FC = () => {
         initialData={exportPreviewData}
         onDownload={handleFinalDownload}
         onSaveToSystem={handleSystemUpdateFromModal}
+      />
+
+      {/* Delete Confirmation Modal */}
+      <ConfirmationModal 
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal(prev => ({ ...prev, isOpen: false }))}
+        onConfirm={confirmDelete}
+        title="تأكيد الحذف"
+        message={`هل أنت متأكد من أنك تريد حذف الحساب "${deleteModal.accountName}"؟ لا يمكن التراجع عن هذا الإجراء.`}
+        warning={deleteModal.descendantCount > 0 ? `سيتم حذف ${deleteModal.descendantCount} حساب فرعي مرتبط بهذا الحساب!` : undefined}
       />
     </div>
   );
